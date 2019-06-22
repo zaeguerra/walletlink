@@ -4,33 +4,41 @@
 import bind from "bind-decorator"
 import BN from "bn.js"
 import crypto from "crypto"
+import querystring from "querystring"
 import url from "url"
-import { AddressString, IntNumber, RegExpString } from "./types"
-import { bigIntStringFromBN, hexStringFromBuffer } from "./util"
-import { WalletLinkNotification } from "./WalletLinkNotification"
-import * as walletLinkStorage from "./walletLinkStorage"
-import { Web3Method } from "./Web3Method"
+import { AddressString, IntNumber, RegExpString } from "./types/common"
+import { isLinkedMessage } from "./types/LinkedMessage"
+import { isUnlinkedMessage } from "./types/UnlinkedMessage"
+import { isWeb3DenyAddressesMessage } from "./types/Web3DenyAddressesMessage"
 import {
   EthereumAddressFromSignedMessageRequest,
-  RequestEthereumAddressesRequest,
+  RequestEthereumAccountsRequest,
   ScanQRCodeRequest,
   SignEthereumMessageRequest,
   SignEthereumTransactionRequest,
   SubmitEthereumTransactionRequest,
-  Web3Request,
-  Web3RequestMessage
-} from "./Web3Request"
+  Web3Method,
+  Web3Request
+} from "./types/Web3Request"
+import { Web3RequestMessage } from "./types/Web3RequestMessage"
 import {
+  ErrorResponse,
   EthereumAddressFromSignedMessageResponse,
-  isWeb3ResponseMessage,
-  RequestEthereumAddressesResponse,
+  RequestEthereumAccountsResponse,
   ScanQRCodeResponse,
   SignEthereumMessageResponse,
   SignEthereumTransactionResponse,
   SubmitEthereumTransactionResponse,
-  Web3Response,
+  Web3Response
+} from "./types/Web3Response"
+import {
+  isWeb3ResponseMessage,
   Web3ResponseMessage
-} from "./Web3Response"
+} from "./types/Web3ResponseMessage"
+import { isWeb3RevealAddressesMessage } from "./types/Web3RevealAddressesMessage"
+import { bigIntStringFromBN, hexStringFromBuffer } from "./util"
+import { WalletLinkNotification } from "./WalletLinkNotification"
+import * as walletLinkStorage from "./walletLinkStorage"
 
 export interface EthereumTransactionParams {
   fromAddress: AddressString
@@ -45,57 +53,62 @@ export interface EthereumTransactionParams {
 
 type ResponseCallback = (response: Web3Response) => void
 
+export interface WalletLinkRelayOptions {
+  walletLinkWebUrl: string
+  appName: string
+  appLogoUrl: string
+}
+
 export class WalletLinkRelay {
   private static _callbacks = new Map<string, ResponseCallback>()
+  private static _accountRequestCallbackIds = new Set<string>()
 
   private readonly _walletLinkWebUrl: string
   private readonly _walletLinkWebOrigin: string
+  private readonly appName: string
+  private readonly appLogoUrl: string
 
-  private _iframe: HTMLIFrameElement | null = null
-  private _walletLinkWindow: Window | null = null
+  private _iframeEl: HTMLIFrameElement | null = null
+  private popupWindow: Window | null = null
 
   private _linked = false
 
-  constructor(walletLinkWebUrl: string) {
-    this._walletLinkWebUrl = walletLinkWebUrl
+  constructor(options: Readonly<WalletLinkRelayOptions>) {
+    this._walletLinkWebUrl = options.walletLinkWebUrl
+    this.appName = options.appName
+    this.appLogoUrl = options.appLogoUrl
 
     const u = url.parse(this._walletLinkWebUrl)
     this._walletLinkWebOrigin = `${u.protocol}//${u.host}`
   }
 
   public injectIframe(): void {
-    if (this._iframe) {
+    if (this._iframeEl) {
       throw new Error("iframe already injected!")
     }
-    const iframe = document.createElement("iframe")
-    iframe.className = "_WalletLinkBridge"
-    iframe.src = `${this._walletLinkWebUrl}/#/bridge`
-    iframe.width = "1"
-    iframe.height = "1"
-    iframe.style.opacity = "0"
-    iframe.style.pointerEvents = "none"
-    iframe.style.position = "absolute"
-    iframe.style.top = "0"
-    iframe.style.right = "0"
-    this._iframe = iframe
-    document.documentElement.appendChild(iframe)
+    const iframeEl = document.createElement("iframe")
+    iframeEl.className = "_WalletLinkBridge"
+    iframeEl.src = `${this._walletLinkWebUrl}/#/bridge`
+    iframeEl.width = "1"
+    iframeEl.height = "1"
+    iframeEl.style.opacity = "0"
+    iframeEl.style.pointerEvents = "none"
+    iframeEl.style.position = "absolute"
+    iframeEl.style.top = "0"
+    iframeEl.style.right = "0"
+    this._iframeEl = iframeEl
+    document.documentElement.appendChild(iframeEl)
 
     window.addEventListener("message", this._handleMessage, false)
   }
 
-  public requestEthereumAccounts(
-    appName: string,
-    appLogoUrl: string | null
-  ): Promise<RequestEthereumAddressesResponse> {
+  public requestEthereumAccounts(): Promise<RequestEthereumAccountsResponse> {
     return this.sendRequest<
-      RequestEthereumAddressesRequest,
-      RequestEthereumAddressesResponse
+      RequestEthereumAccountsRequest,
+      RequestEthereumAccountsResponse
     >({
-      method: Web3Method.requestEthereumAddresses,
-      params: {
-        appName,
-        appLogoUrl: appLogoUrl || this._getFavicon()
-      }
+      method: Web3Method.requestEthereumAccounts,
+      params: {}
     })
   }
 
@@ -210,37 +223,34 @@ export class WalletLinkRelay {
     request: T
   ): Promise<U> {
     return new Promise((resolve, reject) => {
-      if (!this._iframe || !this._iframe.contentWindow) {
+      if (!this._iframeEl || !this._iframeEl.contentWindow) {
         return reject("iframe is not initialized")
       }
       const id = crypto.randomBytes(8).toString("hex")
 
-      let notificationMessage: string
-
-      if (request.method === Web3Method.requestEthereumAddresses) {
-        notificationMessage = "Requested access to your account..."
-        if (!this._linked) {
-          this._openWalletLinkWindow()
-        }
-      } else {
-        notificationMessage = "Pushed a WalletLink request to your device..."
-      }
+      const isRequestEthereumAccounts =
+        request.method === Web3Method.requestEthereumAccounts
 
       const notification = new WalletLinkNotification({
-        message: notificationMessage,
+        message: isRequestEthereumAccounts
+          ? "Requested access to your account..."
+          : "Pushed a WalletLink request to your device...",
         onClickCancel: () => {
-          this._invokeCallback({
-            id,
-            response: { errorMessage: "User rejected request" }
-          })
+          this._invokeCallback(
+            Web3ResponseMessage({
+              id,
+              response: { errorMessage: "User rejected request" }
+            })
+          )
         },
         onClickHelp: () => {
-          this._openWalletLinkWindow()
+          this._openLinkWindow()
         }
       })
+      notification.show()
 
       WalletLinkRelay._callbacks.set(id, response => {
-        this._closeWalletLinkWindow()
+        this._closePopupWindow()
         notification.hide()
         if (response.errorMessage) {
           return reject(new Error(response.errorMessage))
@@ -248,15 +258,35 @@ export class WalletLinkRelay {
         resolve(response as U)
       })
 
-      const message: Web3RequestMessage = { id, request }
-      this._iframe.contentWindow.postMessage(message, this._walletLinkWebOrigin)
-      notification.show()
+      if (isRequestEthereumAccounts) {
+        if (this._linked) {
+          this._openAuthorizeWindow()
+        } else {
+          this._openLinkWindow()
+        }
+
+        WalletLinkRelay._accountRequestCallbackIds.add(id)
+        return
+      }
+
+      this._iframeEl.contentWindow.postMessage(
+        Web3RequestMessage({ id, request }),
+        this._walletLinkWebOrigin
+      )
     })
   }
 
-  private _openWalletLinkWindow(): void {
-    if (this._walletLinkWindow && this._walletLinkWindow.opener) {
-      this._walletLinkWindow.focus()
+  private _openLinkWindow(): void {
+    this._openPopupWindow("/link")
+  }
+
+  private _openAuthorizeWindow(): void {
+    this._openPopupWindow("/authorize")
+  }
+
+  private _openPopupWindow(path: string): void {
+    if (this.popupWindow && this.popupWindow.opener) {
+      this.popupWindow.focus()
       return
     }
     const width = 320
@@ -264,8 +294,14 @@ export class WalletLinkRelay {
     const left = Math.floor(window.outerWidth / 2 - width / 2 + window.screenX)
     const top = Math.floor(window.outerHeight / 2 - height / 2 + window.screenY)
 
-    this._walletLinkWindow = window.open(
-      `${this._walletLinkWebUrl}/#/link`,
+    const query = querystring.stringify({
+      appName: this.appName,
+      appLogoUrl: this.appLogoUrl,
+      origin: document.location.origin
+    })
+
+    this.popupWindow = window.open(
+      `${this._walletLinkWebUrl}/#${path}?${query}`,
       "_blank",
       [
         `width=${width}`,
@@ -282,37 +318,12 @@ export class WalletLinkRelay {
     )
   }
 
-  private _closeWalletLinkWindow(): void {
-    if (this._walletLinkWindow) {
-      this._walletLinkWindow.close()
-      this._walletLinkWindow = null
+  private _closePopupWindow(): void {
+    if (this.popupWindow) {
+      this.popupWindow.close()
+      this.popupWindow = null
     }
     window.focus()
-  }
-
-  private _getFavicon(): string | null {
-    const el =
-      document.querySelector('link[sizes="192x192"]') ||
-      document.querySelector('link[sizes="180x180"]') ||
-      document.querySelector('link[rel="icon"]') ||
-      document.querySelector('link[rel="shortcut icon"]')
-
-    const { protocol, host } = document.location
-    const href = el ? el.getAttribute("href") : null
-    if (!href || href.startsWith("javascript:")) {
-      return null
-    }
-    if (
-      href.startsWith("http://") ||
-      href.startsWith("https://") ||
-      href.startsWith("data:")
-    ) {
-      return href
-    }
-    if (href.startsWith("//")) {
-      return protocol + href
-    }
-    return `${protocol}//${host}${href}`
   }
 
   private _invokeCallback(message: Web3ResponseMessage) {
@@ -329,22 +340,48 @@ export class WalletLinkRelay {
       return
     }
 
-    switch (evt.data) {
-      case "WALLETLINK_LINKED": {
-        this._linked = true
-        return
-      }
+    const message: unknown = evt.data
 
-      case "WALLETLINK_UNLINKED": {
-        this._linked = false
-        walletLinkStorage.clear()
-        document.location.reload()
-        return
-      }
+    if (isLinkedMessage(message)) {
+      this._linked = true
+      return
     }
 
-    if (isWeb3ResponseMessage(evt.data)) {
-      this._invokeCallback(evt.data)
+    if (isUnlinkedMessage(message)) {
+      this._linked = false
+      walletLinkStorage.clear()
+      document.location.reload()
+      return
+    }
+
+    if (isWeb3RevealAddressesMessage(message)) {
+      Array.from(WalletLinkRelay._accountRequestCallbackIds.values()).forEach(
+        id => {
+          const response: RequestEthereumAccountsResponse = {
+            result: message.addresses as AddressString[]
+          }
+          this._invokeCallback(Web3ResponseMessage({ id, response }))
+        }
+      )
+      WalletLinkRelay._accountRequestCallbackIds.clear()
+      return
+    }
+
+    if (isWeb3DenyAddressesMessage(message)) {
+      Array.from(WalletLinkRelay._accountRequestCallbackIds.values()).forEach(
+        id => {
+          const response: ErrorResponse = {
+            errorMessage: "User denied account authorization"
+          }
+          this._invokeCallback(Web3ResponseMessage({ id, response }))
+        }
+      )
+      WalletLinkRelay._accountRequestCallbackIds.clear()
+      return
+    }
+
+    if (isWeb3ResponseMessage(message)) {
+      this._invokeCallback(message)
     }
   }
 }

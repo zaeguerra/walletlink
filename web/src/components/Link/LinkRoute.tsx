@@ -2,57 +2,54 @@
 // Licensed under the Apache License, version 2.0
 
 import bind from "bind-decorator"
-import React, { MouseEvent } from "react"
+import React from "react"
 import { RouteComponentProps } from "react-router"
-import { style as typestyle } from "typestyle"
+import { Subscription } from "rxjs"
 import { Session } from "../../models/Session"
-import { SessionQRCode } from "./SessionQRCode"
+import { routes } from "../../routes"
+import { AppContext } from "../AppContext"
+import { LinkPage } from "./LinkPage"
 
-export interface Props extends RouteComponentProps {
-  connected: boolean
-  linked: boolean
-  webUrl: string
-  serverUrl: string
-  sessionId: string
-  sessionSecret: string
-}
+export class LinkRoute extends React.PureComponent<RouteComponentProps> {
+  public static contextType = AppContext
+  public context!: React.ContextType<typeof AppContext>
 
-const style = typestyle({
-  textAlign: "center"
-})
+  private subscriptions = new Subscription()
 
-export class LinkRoute extends React.PureComponent<Props> {
+  public componentDidMount() {
+    const { mainRepo } = this.context
+
+    this.subscriptions.add(
+      mainRepo.onceLinked$.subscribe(() => {
+        const { history } = this.props
+        history.replace({
+          pathname: routes.authorize,
+          search: history.location.search
+        })
+      })
+    )
+  }
+
+  public componentWillUnmount() {
+    this.subscriptions.unsubscribe()
+  }
+
   public render() {
-    const {
-      connected,
-      linked,
-      webUrl,
-      serverUrl,
-      sessionId,
-      sessionSecret
-    } = this.props
+    const { mainRepo } = this.context
 
     return (
-      <div className={style}>
-        <p>WalletLink</p>
-        <SessionQRCode
-          webUrl={webUrl}
-          serverUrl={serverUrl}
-          sessionId={sessionId}
-          sessionSecret={sessionSecret}
-        />
-        <p>{connected ? "Connected" : "Disconnected"}</p>
-        <p>{linked ? "Linked" : "Not Linked"}</p>
-
-        <button onClick={this.handleClickUnlink}>Unlink</button>
-      </div>
+      <LinkPage
+        webUrl={mainRepo.webUrl}
+        serverUrl={mainRepo.serverUrl}
+        sessionId={mainRepo.sessionId}
+        sessionSecret={mainRepo.sessionSecret}
+        onClickUnlink={this.handleClickUnlink}
+      />
     )
   }
 
   @bind
-  private handleClickUnlink(evt: MouseEvent): void {
-    evt.preventDefault()
-
+  private handleClickUnlink(): void {
     Session.clear()
     document.location.reload()
   }

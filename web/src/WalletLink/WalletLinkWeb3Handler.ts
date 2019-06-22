@@ -2,21 +2,29 @@
 // Licensed under the Apache License, version 2.0
 
 import bind from "bind-decorator"
+import { nextTick } from "q"
 import { empty, fromEvent, of, Subscription } from "rxjs"
 import { filter, flatMap } from "rxjs/operators"
 import * as aes256gcm from "../lib/aes256gcm"
+import { postMessageToParent } from "./ipc"
 import { ServerMessageEvent } from "./messages"
 import {
   isWeb3RequestMessage,
-  isWeb3ResponseMessage,
   Web3RequestMessageWithOrigin
-} from "./types"
+} from "./types/Web3RequestMessage"
+import {
+  isWeb3ResponseMessage,
+  Web3ResponseMessage
+} from "./types/Web3ResponseMessage"
 import { WalletLinkHost } from "./WalletLinkHost"
 
 export class WalletLinkWeb3Handler {
   private subscriptions = new Subscription()
 
-  constructor(private walletLinkHost: WalletLinkHost, private secret: string) {}
+  constructor(
+    private readonly walletLinkHost: WalletLinkHost,
+    private readonly secret: string
+  ) {}
 
   public listen() {
     this.subscriptions.add(
@@ -46,9 +54,19 @@ export class WalletLinkWeb3Handler {
   private handleWeb3Request(request: Web3RequestMessageWithOrigin): void {
     const encrypted = aes256gcm.encrypt(JSON.stringify(request), this.secret)
 
-    this.walletLinkHost
+    const sub = this.walletLinkHost
       .publishEvent("Web3Request", encrypted)
-      .subscribe(null, err => console.log(err))
+      .subscribe(null, err => {
+        const response = Web3ResponseMessage({
+          id: request.id,
+          response: {
+            errorMessage: err.message || String(err)
+          }
+        })
+        postMessageToParent(response)
+        nextTick(() => this.subscriptions.remove(sub))
+      })
+    this.subscriptions.add(sub)
   }
 
   @bind
@@ -65,9 +83,6 @@ export class WalletLinkWeb3Handler {
       return
     }
 
-    if (window.parent) {
-      // tslint:disable-next-line: tsr-detect-unsafe-cross-origin-communication
-      window.parent.postMessage(response, "*")
-    }
+    postMessageToParent(response)
   }
 }

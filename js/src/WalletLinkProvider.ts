@@ -6,17 +6,14 @@ import crypto from "crypto"
 import { EventEmitter } from "events"
 import "whatwg-fetch"
 import { FilterPolyfill } from "./FilterPolyfill"
+import { AddressString, Callback, IntNumber } from "./types/common"
+import { JSONRPCMethod, JSONRPCRequest, JSONRPCResponse } from "./types/JSONRPC"
 import {
-  AddressString,
-  Callback,
-  IntNumber,
-  JSONRPCMethod,
-  JSONRPCRequest,
-  JSONRPCResponse,
   ProviderError,
   ProviderErrorCode,
   Web3Provider
-} from "./types"
+} from "./types/Web3Provider"
+import { RequestEthereumAccountsResponse } from "./types/Web3Response"
 import {
   ensureAddressString,
   ensureBN,
@@ -27,24 +24,19 @@ import {
 } from "./util"
 import { EthereumTransactionParams, WalletLinkRelay } from "./WalletLinkRelay"
 import * as walletLinkStorage from "./walletLinkStorage"
-import { RequestEthereumAddressesResponse } from "./Web3Response"
 
 export interface WalletLinkProviderOptions {
   relay: WalletLinkRelay
-  appName?: string
-  appLogoUrl?: string | null
+  appName: string
   jsonRpcUrl: string
   chainId?: number
 }
-
-const DEFAULT_APP_NAME = "DApp"
 
 export class WalletLinkProvider extends EventEmitter implements Web3Provider {
   private readonly _filterPolyfill = new FilterPolyfill(this)
 
   private readonly _relay: WalletLinkRelay
   private readonly _appName: string
-  private readonly _appLogoUrl: string | null = null
   private readonly _chainId: IntNumber
   private readonly _jsonRpcUrl: string
   private readonly _providerId: string
@@ -55,7 +47,7 @@ export class WalletLinkProvider extends EventEmitter implements Web3Provider {
     return `WalletLinkProvider:${this._providerId}:addresses`
   }
 
-  constructor(options: WalletLinkProviderOptions) {
+  constructor(options: Readonly<WalletLinkProviderOptions>) {
     super()
     if (!options.relay) {
       throw new Error("realy must be provided")
@@ -64,8 +56,7 @@ export class WalletLinkProvider extends EventEmitter implements Web3Provider {
       throw new Error("jsonRpcUrl must be provided")
     }
     this._relay = options.relay
-    this._appName = options.appName || DEFAULT_APP_NAME
-    this._appLogoUrl = options.appLogoUrl || null
+    this._appName = options.appName
     this._chainId = ensureIntNumber(options.chainId || 1)
     this._jsonRpcUrl = options.jsonRpcUrl
     this._providerId = crypto
@@ -437,12 +428,9 @@ export class WalletLinkProvider extends EventEmitter implements Web3Provider {
       return Promise.resolve({ jsonrpc: "2.0", id: 0, result: this._addresses })
     }
 
-    let res: RequestEthereumAddressesResponse
+    let res: RequestEthereumAccountsResponse
     try {
-      res = await this._relay.requestEthereumAccounts(
-        this._appName,
-        this._appLogoUrl
-      )
+      res = await this._relay.requestEthereumAccounts()
     } catch (err) {
       if (
         typeof err.message === "string" &&
